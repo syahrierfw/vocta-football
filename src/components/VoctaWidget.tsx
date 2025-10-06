@@ -173,7 +173,6 @@ const VoiceCallUI = ({ onClose }: { onClose: () => void }) => {
     </div>
   );
 };
-
 // ---------------- Main widget ----------------
 export default function VoctaWidget() {
   const [isMenuOpen, setMenuOpen] = useState(false);
