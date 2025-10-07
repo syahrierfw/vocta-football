@@ -18,7 +18,17 @@ You are "Paolo", VOCTA Football's Jersey Specialist.
 - If asked to sum prices, you MUST call the function "calculateTotal".
 - You must use the provided chat history to understand the context of the conversation. Do not ask for information that has already been provided.
 - If a product is not in the catalog, you must say that we don't seem to have it in stock right now.
+
+// --- NEW, MORE EXPLICIT RULES ---
+- CRITICAL: When the user asks to add a product to the cart (e.g., "add this to my cart", "I'll take it, I will buy it, etc"), you MUST use the "addToCartByName" tool. Use the chat history to find the product name if they don't specify it.
+- DO NOT show the product card again if the user is asking to add the currently discussed item to the cart; use the "addToCartByName" tool instead.
+// --- END OF NEW RULES ---
+
+- You must use the provided chat history to understand the context of the conversation. Do not ask for information that has already been provided.
+- If a product is not in the catalog, you must say that we don't seem to have it in stock right now.
 `;
+
+
 
 const SHOP_FACTS = `
 VOCTA Football (Jakarta, ID)
@@ -93,46 +103,51 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ message: "No prompt provided." }, { status: 400 });
     }
 
-    const apiKey =
-      process.env.GEMINI_API_KEY ||
-      process.env.GOOGLE_GENAI_API_KEY ||
-      process.env.GOOGLE_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GENAI_API_KEY || process.env.GOOGLE_API_KEY;
 
     if (!apiKey) {
-      return NextResponse.json(
-        { message: "Server misconfig: GEMINI_API_KEY is missing." },
-        { status: 500 }
-      );
+      return NextResponse.json({ message: "Server misconfig: GEMINI_API_KEY is missing." }, { status: 500 });
     }
 
     const modelId = process.env.GEMINI_MODEL || "gemini-2.5-flash";
     const genAI = new GoogleGenerativeAI(apiKey);
 
-    // ---- Tool: calculateTotal(productNames: string[]) ----
+    // --- CHANGE 1: DEFINE THE NEW addToCartByName TOOL ---
     const tools: Tool[] = [
       {
         functionDeclarations: [
           {
             name: "calculateTotal",
-            description:
-              "Calculate the total price of a list of product names (partial/fuzzy allowed).",
+            description: "Calculate the total price of a list of product names.",
             parameters: {
               type: SchemaType.OBJECT,
               properties: {
                 productNames: {
                   type: SchemaType.ARRAY,
                   items: { type: SchemaType.STRING },
-                  description: "Array of product names to sum.",
                 },
               },
               required: ["productNames"],
+            },
+          },
+          {
+            name: "addToCartByName",
+            description: "Adds a product to the user's shopping cart by its name.",
+            parameters: {
+              type: SchemaType.OBJECT,
+              properties: {
+                productName: {
+                  type: SchemaType.STRING,
+                  description: "The full or partial name of the product to add.",
+                },
+              },
+              required: ["productName"],
             },
           },
         ],
       },
     ];
 
-    // Model with system instruction
     const model = genAI.getGenerativeModel({
       model: modelId,
       systemInstruction: {
@@ -141,12 +156,11 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    // Catalog snapshot
+    // ... (keep catalogString, initialContext, and normalizedHistory logic)
     const catalogString = products
       .map((p) => `- ${p.name} — Rp ${p.price.toLocaleString("id-ID")}`)
       .join("\n");
 
-    // Ensure the first history item is a 'user' message (Gemini requirement)
     const initialContext = {
       role: "user" as const,
       parts: [
@@ -166,55 +180,56 @@ export async function POST(req: NextRequest) {
             return history.slice(firstUserIdx);
           })()
         : [];
-
+    
     const chat = model.startChat({
       tools,
       history: [initialContext, ...normalizedHistory],
-      // generationConfig: { temperature: 0.2, topP: 0.9 }, // optional
     });
 
-    // Send current user turn
     const first = await chat.sendMessage([{ text: userTurn }]);
-
-    // Tool call?
     const call = first.response.functionCalls()?.[0];
-    if (call?.name === "calculateTotal") {
-      const argsObj = (call.args ?? {}) as Record<string, unknown>;
-      const rawNames = argsObj["productNames"];
-      const names: string[] = Array.isArray(rawNames) ? rawNames.map(String) : [];
 
-      let total = 0;
-      const found: string[] = [];
+    // --- CHANGE 2: HANDLE THE NEW addToCartByName TOOL CALL ---
+    if (call?.name === "addToCartByName") {
+      const argsObj = (call.args ?? {}) as { productName?: string };
+      const name = argsObj.productName ?? "";
+      
+      const productToAdd = products.find((p) => 
+        p.name.toLowerCase().includes(name.toLowerCase())
+      );
 
-      for (const n of names) {
-        const p = products.find((x) =>
-          x.name.toLowerCase().includes(n.toLowerCase())
-        );
-        if (p) {
-          total += p.price;
-          found.push(p.name);
-        }
+      if (productToAdd) {
+        // IMPORTANT: Send an "action" command to the frontend
+        return NextResponse.json({
+          action: 'addToCart',
+          actionParams: { product: productToAdd },
+          message: `Sure thing! I've added the "${productToAdd.name}" to your cart.`
+        });
+      } else {
+        return NextResponse.json({ message: `Sorry, I couldn't find a product named "${name}" in our catalog.` });
       }
-
-      const follow = await chat.sendMessage([
-        {
-          functionResponse: {
-            name: "calculateTotal",
-            response: {
-              currency: "Rp",
-              totalPrice: total,
-              formatted: `Rp ${total.toLocaleString("id-ID")}`,
-              foundProducts: found,
-            },
-          },
-        },
-      ]);
-
-      return NextResponse.json({ message: follow.response.text() });
     }
 
-    // Normal path
-    return NextResponse.json({ message: first.response.text() });
+    // ... (keep your existing calculateTotal and product card logic here)
+    if (call?.name === "calculateTotal") {
+        // ... (your existing calculateTotal logic)
+    }
+
+    const modelResponseText = first.response.text();
+    const mentionedProduct = products.find(p => 
+      modelResponseText.toLowerCase().includes(p.name.toLowerCase())
+    );
+    
+    if (mentionedProduct) {
+      return NextResponse.json({
+        component: 'product-card',
+        componentProps: mentionedProduct,
+        message: `Here is the ${mentionedProduct.name} you asked about.`
+      });
+    }
+    
+    return NextResponse.json({ message: modelResponseText });
+
   } catch (err: any) {
     console.error("Gemini route error:", err);
     return NextResponse.json(

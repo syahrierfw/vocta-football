@@ -1,10 +1,14 @@
-// src/components/Chatbot.tsx
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
 import { X, Send } from 'lucide-react'
 import Image from 'next/image'
 import { Poppins } from 'next/font/google'
+
+// --- ADDED IMPORTS ---
+import { useCart } from '@/context/CartContext'
+import { Product } from '@/data/products'
+import ProductCard from './ProductCard'
 
 const poppins = Poppins({
   subsets: ['latin'],
@@ -13,9 +17,7 @@ const poppins = Poppins({
 })
 
 type VoctaChatbotProps = {
-  /** If provided, the chat open state becomes controlled by the parent */
   isOpen?: boolean
-  /** Called when user clicks the close button */
   onClose?: () => void
 }
 
@@ -45,7 +47,6 @@ function TypingDots() {
   )
 }
 
-// 1) helper to push greeting once
 function makeGreeting() {
   return (
     <span>
@@ -56,7 +57,6 @@ function makeGreeting() {
 }
 
 export default function VoctaChatbot({ isOpen, onClose }: VoctaChatbotProps) {
-  // If parent provides isOpen, we mirror it; otherwise we manage our own.
   const [open, setOpen] = useState<boolean>(isOpen ?? false)
   useEffect(() => {
     if (typeof isOpen === 'boolean') setOpen(isOpen)
@@ -69,6 +69,9 @@ export default function VoctaChatbot({ isOpen, onClose }: VoctaChatbotProps) {
   const [isTyping, setIsTyping] = useState(false)
   const [showInitialSuggestions, setShowInitialSuggestions] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
+
+  // --- ADDED: Get addToCart function from context ---
+  const { addToCart } = useCart();
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -86,11 +89,11 @@ export default function VoctaChatbot({ isOpen, onClose }: VoctaChatbotProps) {
     else setOpen(false)
   }
 
+  // --- REWORKED handleSend FUNCTION ---
   const handleSend = async (text?: string) => {
     const userMessage = text || input.trim()
     if (!userMessage) return
 
-    // Build compact history (skip ReactNode greeting)
     const history = messages
       .filter((m) => typeof m.text === 'string' && (m.text as string).trim().length > 0)
       .slice(-MAX_HISTORY)
@@ -99,10 +102,10 @@ export default function VoctaChatbot({ isOpen, onClose }: VoctaChatbotProps) {
         content: m.text as string,
       }))
 
-    // Optimistic user message
     setMessages((prev) => [...prev, { from: 'user', text: userMessage, time: getCurrentTime() }])
     setInput('')
     setIsTyping(true)
+    //setShowInitialSuggestions(false);
 
     const payload = {
       message: userMessage,
@@ -130,12 +133,44 @@ export default function VoctaChatbot({ isOpen, onClose }: VoctaChatbotProps) {
         return
       }
 
-      const data: unknown = await res.json()
-      const reply =
-        typeof (data as { message?: unknown }).message === 'string'
-          ? (data as { message: string }).message
-          : "Sorry, I didn’t quite catch that."
-      setMessages((prev) => [...prev, { from: 'agent', text: reply, time: getCurrentTime() }])
+      const data: { 
+        message?: string; 
+        component?: string; 
+        componentProps?: Product;
+        action?: string;
+        actionParams?: { product: Product };
+      } = await res.json();
+      
+      let agentReply: { from: 'agent'; text: string | React.ReactNode; time: string };
+
+      if (data.action === 'addToCart' && data.actionParams?.product) {
+        addToCart(data.actionParams.product);
+        agentReply = {
+          from: 'agent',
+          text: data.message || `Added ${data.actionParams.product.name} to cart.`,
+          time: getCurrentTime(),
+        };
+      } else if (data.component === 'product-card' && data.componentProps) {
+        agentReply = {
+          from: 'agent',
+          text: (
+            <div>
+              {data.message && <p className="mb-2 text-sm">{data.message}</p>}
+              <ProductCard product={data.componentProps} />
+            </div>
+          ),
+          time: getCurrentTime(),
+        };
+      } else {
+        const replyText = data.message || "Sorry, I didn’t quite catch that.";
+        agentReply = {
+          from: 'agent',
+          text: replyText,
+          time: getCurrentTime(),
+        };
+      }
+      setMessages((prev) => [...prev, agentReply]);
+
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       setMessages((prev) => [...prev, { from: 'agent', text: `⚠️ Network error: ${msg}`, time: getCurrentTime() }])
@@ -144,17 +179,10 @@ export default function VoctaChatbot({ isOpen, onClose }: VoctaChatbotProps) {
     }
   }
 
-  // Open button: show greeting on first open
   const openWithGreeting = () => {
     setOpen(true)
     if (messages.length === 0) {
-      const greeting = (
-        <span>
-          Hi there! I&apos;m <span className="font-semibold text-red-600">Paolo</span>, your Jersey
-          Specialist. How can I help you today?
-        </span>
-      )
-      setMessages([{ from: 'agent', text: greeting, time: getCurrentTime() }])
+      setMessages([{ from: 'agent', text: makeGreeting(), time: getCurrentTime() }])
       setShowInitialSuggestions(true)
     }
   }
@@ -184,7 +212,6 @@ export default function VoctaChatbot({ isOpen, onClose }: VoctaChatbotProps) {
           </div>
 
           <div className="flex-1 p-4 space-y-4 overflow-y-auto">
-            {/* Greeting + Quick Replies */}
             {messages.length > 0 && showInitialSuggestions && (
               <div className="flex items-end gap-2 max-w-full">
                 <Image src="/images/paolo-avatar.png" className="rounded-full self-end" alt="Paolo" width={30} height={30} />
@@ -207,13 +234,13 @@ export default function VoctaChatbot({ isOpen, onClose }: VoctaChatbotProps) {
               </div>
             )}
 
-            {/* History */}
             {messages.map(
               (msg, i) =>
-                i > 0 && (
+                (!showInitialSuggestions || i > 0) && (
                   <div key={i} className={`flex flex-col ${msg.from === 'user' ? 'items-end' : 'items-start'}`}>
                     <div className={`flex ${msg.from === 'user' ? 'flex-row-reverse' : 'flex-row'} items-end gap-2 max-w-[85%]`}>
                       {msg.from === 'agent' && (
+                        typeof msg.text !== 'string' ? null :
                         <Image src="/images/paolo-avatar.png" className="rounded-full self-end" alt="Paolo" width={30} height={30} />
                       )}
                       <div
