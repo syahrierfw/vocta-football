@@ -11,24 +11,37 @@ export const runtime = "nodejs";
 
 /* ---------------- Persona & Facts ---------------- */
 const SYSTEM_PROMPT = `
-You are "Paolo", VOCTA Football's Jersey Specialist.
-- Speak like store staff that are nice. Never say "As an AI".
-- Be concise, practical, and friendly.
-- Use VOCTA policies as source of truth.
-- If asked to sum prices, you MUST call the function "calculateTotal".
-- You must use the provided chat history to understand the context of the conversation. Do not ask for information that has already been provided.
-- If a product is not in the catalog, you must say that we don't seem to have it in stock right now.
+You are "Paolo", VOCTA Football's Jersey Specialist and a senior salesperson. You are a world-class expert on AC Milan kits.
+- Speak like an expert, friendly, engaging and proactive store staff. Never say "As an AI".
+- Be concise and practical.
+- Use VOCTA policies as your source of truth.
 
-// --- NEW, MORE EXPLICIT RULES ---
-- CRITICAL: When the user asks to add a product to the cart (e.g., "add this to my cart", "I'll take it, I will buy it, etc"), you MUST use the "addToCartByName" tool. Use the chat history to find the product name if they don't specify it.
-- DO NOT show the product card again if the user is asking to add the currently discussed item to the cart; use the "addToCartByName" tool instead.
-// --- END OF NEW RULES ---
+--- CLUB & KIT KNOWLEDGE (CRITICAL) ---
+- Primary Colors: AC Milan's traditional colors are red and black (the Rossoneri). Their away kits are traditionally white.
+- Color Nuances: The club has a rich history of bold third, fourth, and special edition kits. You MUST be aware of these.
+- Non-Traditional Colors: If a user asks about non-traditional colors like BLUE, GREEN, PINK, YELLOW, or GOLD, you must acknowledge that the club has indeed used these colors. // ADDED "GOLD"
+- Specific Examples to Mention:
+  - Blue: The famous 1995/96 blue fourth kit.
+  - Green: The olive-green 2022/23 third kit.
+  - Pink/Purple: The 2023/24 third kit had a pink and purple pattern.
+  - Gold: The popular 2013/14 gold third kit. // ADDED EXAMPLE
+- Club Facts: San Siro stadium; 19× Serie A titles; 7× UCL titles.
+- Collabs: Off-White (since 2022), Pleasures.
 
-- You must use the provided chat history to understand the context of the conversation. Do not ask for information that has already been provided.
-- If a product is not in the catalog, you must say that we don't seem to have it in stock right now.
+--- HANDLING UNAVAILABLE ITEMS ---
+- Our store ONLY sells AC Milan jerseys. If a user asks for ANY OTHER TEAM (Lazio, Inter, etc.), state that we specialize exclusively in AC Milan and pivot back to helping them find a Milan jersey.
+- If asked about a color we don't have in the current catalog, use your kit knowledge. Example: "While we don't have a gold one in this season's collection, the 13/14 third kit was a memorable one. Our current stock focuses on the classic home, away, and third kits."
+
+--- SALES TACTICS ---
+- After a user adds an item to the cart, you MUST ask a relevant, intelligent upsell question.
+- Example (Home Jersey): "Got it, that's in your cart. The official shorts for that kit are also in stock. Would you like to see them?"
+- Example (Vintage Jersey): "Great choice. Many collectors also pick up the away version from that season to complete the set. Interested?"
+
+--- TOOL USAGE RULES ---
+- If asked to sum prices, you MUST call "calculateTotal".
+- When a user asks to add a product to the cart, you MUST call "addToCartByName". Use chat history to find the product name if needed.
+- DO NOT show a product card again if the user is asking to add the currently discussed item; use "addToCartByName" instead.
 `;
-
-
 
 const SHOP_FACTS = `
 VOCTA Football (Jakarta, ID)
@@ -60,16 +73,12 @@ function toGeminiRole(r: ClientMsg["role"]): "user" | "model" {
   return r === "user" ? "user" : "model";
 }
 
-/** Build the conversation memory and the current user turn */
 function buildHistoryAndTurn(body: Body) {
   const arr = Array.isArray(body.messages) ? body.messages : [];
-
-  // Keep a small rolling window and drop empty items
   const cleaned = arr
     .filter((m) => m?.content && typeof m.content === "string" && m.content.trim().length)
     .slice(-MAX_HISTORY);
 
-  // Choose the *last* user message as the current turn.
   const lastUserIdxFromEnd = [...cleaned].reverse().findIndex((m) => m.role === "user");
   const lastUserAbs =
     lastUserIdxFromEnd === -1 ? -1 : cleaned.length - lastUserIdxFromEnd - 1;
@@ -79,7 +88,7 @@ function buildHistoryAndTurn(body: Body) {
 
   if (lastUserAbs !== -1) {
     userTurn = cleaned[lastUserAbs].content.trim();
-    historyOnly = cleaned.slice(0, lastUserAbs); // everything before that user message
+    historyOnly = cleaned.slice(0, lastUserAbs);
   } else {
     userTurn = (body.message ?? "").toString().trim();
     historyOnly = cleaned;
@@ -112,7 +121,6 @@ export async function POST(req: NextRequest) {
     const modelId = process.env.GEMINI_MODEL || "gemini-2.5-flash";
     const genAI = new GoogleGenerativeAI(apiKey);
 
-    // --- CHANGE 1: DEFINE THE NEW addToCartByName TOOL ---
     const tools: Tool[] = [
       {
         functionDeclarations: [
@@ -122,10 +130,7 @@ export async function POST(req: NextRequest) {
             parameters: {
               type: SchemaType.OBJECT,
               properties: {
-                productNames: {
-                  type: SchemaType.ARRAY,
-                  items: { type: SchemaType.STRING },
-                },
+                productNames: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
               },
               required: ["productNames"],
             },
@@ -136,10 +141,7 @@ export async function POST(req: NextRequest) {
             parameters: {
               type: SchemaType.OBJECT,
               properties: {
-                productName: {
-                  type: SchemaType.STRING,
-                  description: "The full or partial name of the product to add.",
-                },
+                productName: { type: SchemaType.STRING, description: "The full or partial name of the product to add." },
               },
               required: ["productName"],
             },
@@ -156,30 +158,13 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    // ... (keep catalogString, initialContext, and normalizedHistory logic)
-    const catalogString = products
-      .map((p) => `- ${p.name} — Rp ${p.price.toLocaleString("id-ID")}`)
-      .join("\n");
-
+    const catalogString = products.map((p) => `- ${p.name} — Rp ${p.price.toLocaleString("id-ID")}`).join("\n");
     const initialContext = {
       role: "user" as const,
-      parts: [
-        {
-          text:
-            `Use VOCTA shop facts & this catalog as ground truth.\n` +
-            `${SHOP_FACTS}\n\nCatalog:\n${catalogString}`,
-        },
-      ],
+      parts: [{ text: `Use VOCTA shop facts & this catalog as ground truth.\n${SHOP_FACTS}\n\nCatalog:\n${catalogString}` }],
     };
 
-    let normalizedHistory =
-      history && history.length
-        ? (() => {
-            const firstUserIdx = history.findIndex((h) => h.role === "user");
-            if (firstUserIdx === -1) return [] as typeof history;
-            return history.slice(firstUserIdx);
-          })()
-        : [];
+    let normalizedHistory = history?.length ? history.slice(history.findIndex((h) => h.role === "user")) : [];
     
     const chat = model.startChat({
       tools,
@@ -189,36 +174,65 @@ export async function POST(req: NextRequest) {
     const first = await chat.sendMessage([{ text: userTurn }]);
     const call = first.response.functionCalls()?.[0];
 
-    // --- CHANGE 2: HANDLE THE NEW addToCartByName TOOL CALL ---
+    // --- FULL TOOL HANDLING LOGIC ---
+
     if (call?.name === "addToCartByName") {
       const argsObj = (call.args ?? {}) as { productName?: string };
       const name = argsObj.productName ?? "";
       
-      const productToAdd = products.find((p) => 
-        p.name.toLowerCase().includes(name.toLowerCase())
-      );
+      const productToAdd = products.find((p) => p.name.toLowerCase().includes(name.toLowerCase()));
 
       if (productToAdd) {
-        // IMPORTANT: Send an "action" command to the frontend
+        const followUp = await chat.sendMessage([
+          {
+            functionResponse: {
+              name: "addToCartByName",
+              response: {
+                success: true,
+                productName: productToAdd.name,
+                price: productToAdd.priceFormatted,
+              },
+            },
+          },
+        ]);
+        
+        const dynamicMessage = followUp.response.text();
+
         return NextResponse.json({
           action: 'addToCart',
           actionParams: { product: productToAdd },
-          message: `Sure thing! I've added the "${productToAdd.name}" to your cart.`
+          message: dynamicMessage
         });
       } else {
         return NextResponse.json({ message: `Sorry, I couldn't find a product named "${name}" in our catalog.` });
       }
     }
-
-    // ... (keep your existing calculateTotal and product card logic here)
+    
     if (call?.name === "calculateTotal") {
-        // ... (your existing calculateTotal logic)
+      const argsObj = (call.args ?? {}) as Record<string, unknown>;
+      const rawNames = argsObj["productNames"];
+      const names: string[] = Array.isArray(rawNames) ? rawNames.map(String) : [];
+
+      let total = 0;
+      const found: string[] = [];
+
+      for (const n of names) {
+        const p = products.find((x) => x.name.toLowerCase().includes(n.toLowerCase()));
+        if (p) {
+          total += p.price;
+          found.push(p.name);
+        }
+      }
+
+      const follow = await chat.sendMessage([
+        { functionResponse: { name: "calculateTotal", response: { currency: "Rp", totalPrice: total, formatted: `Rp ${total.toLocaleString("id-ID")}`, foundProducts: found } } },
+      ]);
+
+      return NextResponse.json({ message: follow.response.text() });
     }
 
     const modelResponseText = first.response.text();
-    const mentionedProduct = products.find(p => 
-      modelResponseText.toLowerCase().includes(p.name.toLowerCase())
-    );
+    const mentionedProduct = products.find(p => modelResponseText.toLowerCase().includes(p.name.toLowerCase()));
     
     if (mentionedProduct) {
       return NextResponse.json({
@@ -232,9 +246,6 @@ export async function POST(req: NextRequest) {
 
   } catch (err: any) {
     console.error("Gemini route error:", err);
-    return NextResponse.json(
-      { message: `Chat service error: ${err?.message || "Unknown"}` },
-      { status: err?.status ?? 502 }
-    );
+    return NextResponse.json({ message: `Chat service error: ${err?.message || "Unknown"}` }, { status: err?.status ?? 502 });
   }
 }

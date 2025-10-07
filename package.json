@@ -9,15 +9,20 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@google-cloud/speech": "^7.2.0",
+    "@google-cloud/text-to-speech": "^6.3.0",
     "@google/generative-ai": "^0.24.1",
     "@vapi-ai/web": "^2.4.0",
     "ai": "^5.0.60",
+    "express": "^5.1.0",
     "lucide-react": "^0.544.0",
+    "microphone-stream": "^6.0.1",
     "next": "15.5.4",
     "openai": "^6.1.0",
     "react": "19.1.0",
     "react-chatbot-kit": "^2.2.2",
     "react-dom": "19.1.0",
+    "ws": "^8.18.3",
     "zod": "^4.1.11"
   },
   "devDependencies": {
